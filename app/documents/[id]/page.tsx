@@ -6,6 +6,7 @@ import { useParams, useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Loader2 } from "lucide-react"
 import {
   ArrowLeft,
   Star,
@@ -22,14 +23,22 @@ import {
   Pill,
   TestTube,
   Stethoscope,
-  Image,
+  Image as ImageIcon,
   Shield,
   Receipt,
   FolderOpen,
   Eye,
 } from "lucide-react"
 import { AppShell } from "@/components/app-shell"
-import { documentStorage, DOCUMENT_CATEGORIES, type Document, type DocumentCategory } from "@/lib/document-management"
+import {
+  getDocumentById,
+  toggleFavorite,
+  toggleArchive,
+  deleteDocument,
+  DOCUMENT_CATEGORIES,
+  type HealthDocument,
+  type DocumentCategory,
+} from "@/lib/firebase-db"
 import { format, formatDistanceToNow } from "date-fns"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -38,7 +47,7 @@ const categoryIcons: Record<DocumentCategory, React.ComponentType<{ className?: 
   prescription: Pill,
   "lab-report": TestTube,
   "medical-record": Stethoscope,
-  imaging: Image,
+  imaging: ImageIcon,
   vaccination: Shield,
   insurance: Shield,
   bills: Receipt,
@@ -82,20 +91,30 @@ function DetailRow({
 function DocumentDetailContent() {
   const params = useParams()
   const router = useRouter()
-  const [doc, setDoc] = useState<Document | null>(null)
+  const [doc, setDoc] = useState<HealthDocument | null>(null)
   const [loading, setLoading] = useState(true)
 
+  const id = params.id as string
+
   useEffect(() => {
-    const id = params.id as string
-    const found = documentStorage.getDocumentById(id)
-    setDoc(found)
-    setLoading(false)
-  }, [params.id])
+    async function loadDoc() {
+      try {
+        const found = await getDocumentById(id)
+        setDoc(found)
+      } catch (err) {
+        console.error("Error fetching document details:", err)
+      } finally {
+        setLoading(false)
+      }
+    }
+    loadDoc()
+  }, [id])
 
   if (loading) {
     return (
-      <div className="p-8 flex items-center justify-center min-h-96">
-        <div className="animate-pulse text-muted-foreground">Loading document...</div>
+      <div className="p-8 flex flex-col items-center justify-center min-h-[50vh]">
+        <Loader2 className="h-8 w-8 text-primary animate-spin" />
+        <p className="text-muted-foreground text-sm mt-3">Loading document details...</p>
       </div>
     )
   }
@@ -117,45 +136,54 @@ function DocumentDetailContent() {
   const colorClass = categoryColors[doc.type] || "bg-gray-500"
   const catInfo = DOCUMENT_CATEGORIES[doc.type]
 
-  const handleToggleFavorite = () => {
-    const updated = documentStorage.toggleFavorite(doc.id)
-    if (updated) {
-      setDoc(updated)
-      toast.success(updated.isFavorite ? "Added to favorites" : "Removed from favorites")
+  const handleToggleFavorite = async () => {
+    try {
+      await toggleFavorite(doc.id, doc.isFavorite)
+      setDoc((prev) => prev ? { ...prev, isFavorite: !prev.isFavorite } : null)
+      toast.success(!doc.isFavorite ? "Added to favorites ⭐" : "Removed from favorites")
+    } catch (err) {
+      toast.error("Failed to update status")
     }
   }
 
-  const handleArchive = () => {
-    const updated = documentStorage.toggleArchive(doc.id)
-    if (updated) {
-      setDoc(updated)
-      toast.success(updated.isArchived ? "Document archived" : "Document unarchived")
+  const handleArchive = async () => {
+    try {
+      await toggleArchive(doc.id, doc.isArchived)
+      setDoc((prev) => prev ? { ...prev, isArchived: !prev.isArchived } : null)
+      toast.success(!doc.isArchived ? "Document archived" : "Document unarchived")
+    } catch (err) {
+      toast.error("Failed to archive document")
     }
   }
 
-  const handleDelete = () => {
-    documentStorage.deleteDocument(doc.id)
-    toast.success("Document deleted")
-    router.push("/documents")
-  }
+  const handleDelete = async () => {
+    const confirmed = window.confirm("Are you sure you want to delete this document permanently?")
+    if (!confirmed) return
 
-  const handleDownload = () => {
-    // In a real app, this would download from cloud storage
-    toast.info("Download feature requires cloud storage integration")
+    try {
+      await deleteDocument(doc.id, doc.storagePath)
+      toast.success("Document deleted permanently")
+      router.push("/documents")
+    } catch (err) {
+      toast.error("Failed to delete document")
+    }
   }
 
   const handleShare = () => {
-    // In a real app, this would open a share dialog
     if (navigator.share) {
       navigator.share({
         title: doc.title,
         text: `Health Document: ${doc.title}`,
-      })
+        url: doc.fileUrl,
+      }).catch(() => {})
     } else {
-      navigator.clipboard.writeText(window.location.href)
-      toast.success("Link copied to clipboard")
+      navigator.clipboard.writeText(doc.fileUrl)
+      toast.success("Download link copied to clipboard! 🔗")
     }
   }
+
+  const isImage = doc.fileType.startsWith("image/")
+  const isPDF = doc.fileType.includes("pdf")
 
   return (
     <div className="p-4 md:p-6 lg:p-8 pb-24 md:pb-8 max-w-5xl mx-auto animate-fade-in">
@@ -181,12 +209,14 @@ function DocumentDetailContent() {
           </Button>
           <Button variant="outline" size="sm" className="gap-1.5" onClick={handleShare}>
             <Share2 className="h-4 w-4" />
-            <span className="hidden sm:inline">Share</span>
+            <span className="hidden sm:inline">Share Link</span>
           </Button>
-          <Button variant="outline" size="sm" className="gap-1.5" onClick={handleDownload}>
-            <Download className="h-4 w-4" />
-            <span className="hidden sm:inline">Download</span>
-          </Button>
+          <a href={doc.fileUrl} download={doc.fileName} target="_blank" rel="noopener noreferrer">
+            <Button variant="outline" size="sm" className="gap-1.5">
+              <Download className="h-4 w-4" />
+              <span className="hidden sm:inline">Download</span>
+            </Button>
+          </a>
           <Button
             variant="outline"
             size="sm"
@@ -225,7 +255,7 @@ function DocumentDetailContent() {
             </CardContent>
           </Card>
 
-          {/* File preview placeholder */}
+          {/* File preview */}
           <Card className="border-border/60">
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
@@ -234,30 +264,38 @@ function DocumentDetailContent() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="bg-muted/50 rounded-xl flex flex-col items-center justify-center h-64 gap-3 border-2 border-dashed border-border">
-                <div className={`p-4 rounded-xl ${colorClass}/10`}>
-                  <Icon className={`h-10 w-10 ${colorClass.replace("bg-", "text-")}`} />
+              {isImage ? (
+                <div className="relative rounded-xl overflow-hidden border border-border flex items-center justify-center bg-muted/30 p-2 max-h-[500px]">
+                  <img src={doc.fileUrl} alt={doc.title} className="max-h-[460px] object-contain rounded-lg shadow-sm" />
                 </div>
-                <div className="text-center">
-                  <p className="font-medium text-foreground">{doc.fileName}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {doc.fileType.includes("pdf") ? "PDF Document" : "Image File"} •{" "}
-                    {(doc.fileSize / 1024 / 1024).toFixed(2)} MB
-                  </p>
+              ) : isPDF ? (
+                <div className="rounded-xl overflow-hidden border border-border h-[500px]">
+                  <iframe src={doc.fileUrl} className="w-full h-full" title={doc.title} />
                 </div>
-                <Button size="sm" variant="outline" className="gap-1.5" onClick={handleDownload}>
-                  <Download className="h-4 w-4" />
-                  Download to view
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground mt-2 text-center">
-                Connect cloud storage to enable in-browser preview
-              </p>
+              ) : (
+                <div className="bg-muted/50 rounded-xl flex flex-col items-center justify-center h-64 gap-3 border-2 border-dashed border-border">
+                  <div className={`p-4 rounded-xl ${colorClass}/10`}>
+                    <Icon className={`h-10 w-10 ${colorClass.replace("bg-", "text-")}`} />
+                  </div>
+                  <div className="text-center">
+                    <p className="font-medium text-foreground">{doc.fileName}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {(doc.fileSize / 1024 / 1024).toFixed(2)} MB
+                    </p>
+                  </div>
+                  <a href={doc.fileUrl} target="_blank" rel="noopener noreferrer">
+                    <Button size="sm" variant="outline" className="gap-1.5">
+                      <Download className="h-4 w-4" />
+                      View Full File
+                    </Button>
+                  </a>
+                </div>
+              )}
             </CardContent>
           </Card>
 
           {/* Tags */}
-          {doc.tags.length > 0 && (
+          {doc.tags && doc.tags.length > 0 && (
             <Card className="border-border/60">
               <CardHeader className="pb-3">
                 <CardTitle className="text-base flex items-center gap-2">
@@ -311,7 +349,7 @@ function DocumentDetailContent() {
             <CardContent className="p-4">
               <Button
                 variant="outline"
-                className="w-full gap-2 text-muted-foreground"
+                className="w-full gap-2 text-muted-foreground hover:bg-muted"
                 onClick={handleArchive}
               >
                 <Archive className="h-4 w-4" />

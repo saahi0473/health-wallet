@@ -1,270 +1,121 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
+import { Activity, Eye, EyeOff, Loader2, AlertCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Checkbox } from "@/components/ui/checkbox"
-import { Activity, Eye, EyeOff, Mail, Lock, ArrowRight, Shield, Zap, Heart } from "lucide-react"
-import { userStorage, sessionStorage as appSession } from "@/lib/user-management"
+import { loginUser } from "@/lib/firebase-auth"
 import { toast } from "sonner"
-
-const features = [
-  { icon: Shield, text: "Bank-level encryption" },
-  { icon: Zap, text: "Instant document access" },
-  { icon: Heart, text: "Emergency health profile" },
-]
 
 export default function SignInPage() {
   const router = useRouter()
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
-  const [showPassword, setShowPassword] = useState(false)
-  const [rememberMe, setRememberMe] = useState(false)
+  const [showPw, setShowPw] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
-  const [errors, setErrors] = useState<{ email?: string; password?: string; general?: string }>({})
-
-  useEffect(() => {
-    const remembered = appSession.getRememberedEmail()
-    if (remembered) {
-      setEmail(remembered)
-      setRememberMe(true)
-    }
-    if (appSession.isAuthenticated()) {
-      router.push("/")
-    }
-  }, [router])
-
-  const validate = () => {
-    const newErrors: typeof errors = {}
-    if (!email.trim()) newErrors.email = "Email is required"
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) newErrors.email = "Enter a valid email"
-    if (!password) newErrors.password = "Password is required"
-    else if (password.length < 6) newErrors.password = "Password must be at least 6 characters"
-    setErrors(newErrors)
-    return Object.keys(newErrors).length === 0
-  }
+  const [error, setError] = useState("")
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!validate()) return
+    setError("")
+    if (!email || !password) { setError("Please fill in all fields"); return }
 
     setIsLoading(true)
-    setErrors({})
-
-    // Simulate API delay for realism
-    await new Promise((r) => setTimeout(r, 800))
-
-    const user = userStorage.validateCredentials(email.trim().toLowerCase(), password)
-    if (!user) {
-      setErrors({ general: "Invalid email or password. Please try again." })
+    try {
+      await loginUser(email, password)
+      toast.success("Welcome back!")
+      router.push("/")
+    } catch (err: any) {
+      const msg = err.code === "auth/invalid-credential"
+        ? "Invalid email or password"
+        : err.code === "auth/too-many-requests"
+        ? "Too many attempts. Try again later."
+        : "Sign in failed. Please try again."
+      setError(msg)
+    } finally {
       setIsLoading(false)
-      return
     }
-
-    appSession.createSession(user, rememberMe)
-    toast.success(`Welcome back, ${user.firstName}! 👋`)
-    router.push("/")
-  }
-
-  const handleDemoLogin = async () => {
-    setIsLoading(true)
-    // Create a demo user if doesn't exist
-    let demoUser = userStorage.findUserByEmail("demo@healthwallet.app")
-    if (!demoUser) {
-      demoUser = userStorage.saveUser({
-        email: "demo@healthwallet.app",
-        firstName: "Alex",
-        lastName: "Demo",
-        password: "demo123",
-      })
-    }
-    await new Promise((r) => setTimeout(r, 600))
-    appSession.createSession(demoUser, false)
-    toast.success("Signed in as demo user!")
-    router.push("/")
   }
 
   return (
     <div className="min-h-screen flex">
-      {/* Left Panel - Branding */}
-      <div className="hidden lg:flex lg:w-1/2 gradient-health relative overflow-hidden">
-        {/* Background decoration */}
-        <div className="absolute inset-0 dot-pattern opacity-10" />
-        <div className="absolute top-[-10%] right-[-10%] w-96 h-96 rounded-full bg-white/10 blur-3xl" />
-        <div className="absolute bottom-[-5%] left-[-5%] w-64 h-64 rounded-full bg-white/10 blur-2xl" />
-
-        <div className="relative z-10 flex flex-col justify-between p-12 text-white w-full">
-          {/* Logo */}
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 bg-white/20 rounded-xl backdrop-blur-sm">
-              <Activity className="h-7 w-7" />
-            </div>
-            <span className="text-2xl font-bold tracking-tight">Health Wallet</span>
+      {/* Left panel */}
+      <div className="hidden lg:flex lg:w-1/2 gradient-health flex-col justify-center items-center p-12 text-white">
+        <div className="max-w-md text-center">
+          <div className="p-4 bg-white/20 rounded-2xl w-fit mx-auto mb-6">
+            <Activity className="h-10 w-10" />
           </div>
-
-          {/* Main content */}
-          <div className="space-y-8">
-            <div>
-              <h1 className="text-5xl font-bold leading-tight mb-4">
-                Your health records,
-                <br />
-                <span className="text-white/80">always with you.</span>
-              </h1>
-              <p className="text-lg text-white/70 leading-relaxed max-w-md">
-                Securely store, organize and share your medical documents with doctors and family — all in one place.
-              </p>
-            </div>
-
-            <div className="space-y-4">
-              {features.map(({ icon: Icon, text }) => (
-                <div key={text} className="flex items-center gap-3">
-                  <div className="p-2 bg-white/20 rounded-lg">
-                    <Icon className="h-4 w-4" />
-                  </div>
-                  <span className="text-white/90 font-medium">{text}</span>
-                </div>
-              ))}
-            </div>
+          <h1 className="text-4xl font-bold mb-4">Health Wallet</h1>
+          <p className="text-white/80 text-lg">
+            Your secure digital vault for all medical records, prescriptions, and health documents.
+          </p>
+          <div className="mt-10 grid grid-cols-2 gap-4 text-left">
+            {["Real Firebase backend","Secure file storage","Sync across devices","Emergency profiles"].map((f) => (
+              <div key={f} className="bg-white/10 rounded-xl p-3 text-sm font-medium">{f}</div>
+            ))}
           </div>
-
-          <p className="text-white/50 text-sm">© 2025 Health Wallet. All rights reserved.</p>
         </div>
       </div>
 
-      {/* Right Panel - Form */}
-      <div className="flex-1 flex items-center justify-center p-6 lg:p-12 bg-background">
-        <div className="w-full max-w-md animate-fade-in">
-          {/* Mobile logo */}
-          <div className="flex items-center gap-2 mb-8 lg:hidden">
-            <div className="p-2 gradient-health rounded-lg">
-              <Activity className="h-5 w-5 text-white" />
+      {/* Right panel */}
+      <div className="flex-1 flex items-center justify-center p-6">
+        <div className="w-full max-w-md space-y-6">
+          <div className="text-center">
+            <div className="lg:hidden p-3 gradient-health rounded-2xl w-fit mx-auto mb-4">
+              <Activity className="h-7 w-7 text-white" />
             </div>
-            <span className="text-xl font-bold">Health Wallet</span>
+            <h2 className="text-2xl font-bold text-foreground">Welcome back</h2>
+            <p className="text-muted-foreground mt-1">Sign in to your Health Wallet</p>
           </div>
 
-          <div className="mb-8">
-            <h2 className="text-3xl font-bold text-foreground mb-2">Welcome back</h2>
-            <p className="text-muted-foreground">Sign in to access your health records</p>
-          </div>
-
-          {/* Demo Login Banner */}
-          <div className="mb-6 p-4 rounded-xl bg-primary/5 border border-primary/20">
-            <p className="text-sm text-muted-foreground mb-2">
-              🎯 Want to explore without signing up?
-            </p>
-            <Button
-              variant="outline"
-              size="sm"
-              className="w-full border-primary/30 text-primary hover:bg-primary/5"
-              onClick={handleDemoLogin}
-              disabled={isLoading}
-            >
-              Try Demo Account
-            </Button>
-          </div>
-
-          <div className="relative mb-6">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-border" />
+          {error && (
+            <div className="flex items-center gap-2 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+              <AlertCircle className="h-4 w-4 flex-shrink-0" />
+              {error}
             </div>
-            <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-background px-3 text-muted-foreground">Or sign in with email</span>
-            </div>
-          </div>
+          )}
 
-          <form onSubmit={handleSubmit} className="space-y-5">
-            {errors.general && (
-              <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
-                {errors.general}
-              </div>
-            )}
-
+          <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="email">Email address</Label>
-              <div className="relative">
-                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  id="email"
-                  type="email"
-                  placeholder="you@example.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className={`pl-10 ${errors.email ? "border-destructive" : ""}`}
-                  autoComplete="email"
-                />
-              </div>
-              {errors.email && <p className="text-xs text-destructive">{errors.email}</p>}
+              <Input id="email" type="email" value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com" autoComplete="email" />
             </div>
 
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="password">Password</Label>
-                <Link
-                  href="/auth/forgot-password"
-                  className="text-xs text-primary hover:underline"
-                >
-                  Forgot password?
-                </Link>
-              </div>
+              <Label htmlFor="password">Password</Label>
               <div className="relative">
-                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  id="password"
-                  type={showPassword ? "text" : "password"}
-                  placeholder="••••••••"
-                  value={password}
+                <Input id="password" type={showPw ? "text" : "password"} value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className={`pl-10 pr-10 ${errors.password ? "border-destructive" : ""}`}
-                  autoComplete="current-password"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  placeholder="••••••••" className="pr-10" autoComplete="current-password" />
+                <button type="button" onClick={() => setShowPw(!showPw)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                  {showPw ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
-              {errors.password && <p className="text-xs text-destructive">{errors.password}</p>}
             </div>
 
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="remember"
-                checked={rememberMe}
-                onCheckedChange={(c) => setRememberMe(c as boolean)}
-              />
-              <Label htmlFor="remember" className="text-sm font-normal cursor-pointer">
-                Remember me for 30 days
-              </Label>
+            <div className="flex justify-end">
+              <Link href="/auth/forgot-password"
+                className="text-sm text-primary hover:underline">
+                Forgot password?
+              </Link>
             </div>
 
-            <Button
-              type="submit"
-              className="w-full gradient-health text-white font-semibold h-11"
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <span className="flex items-center gap-2">
-                  <span className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Signing in...
-                </span>
-              ) : (
-                <span className="flex items-center gap-2">
-                  Sign In
-                  <ArrowRight className="h-4 w-4" />
-                </span>
-              )}
+            <Button type="submit" className="w-full gradient-health text-white h-11 font-semibold"
+              disabled={isLoading}>
+              {isLoading ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Signing in...</> : "Sign In"}
             </Button>
           </form>
 
-          <p className="mt-6 text-center text-sm text-muted-foreground">
+          <p className="text-center text-sm text-muted-foreground">
             Don&apos;t have an account?{" "}
-            <Link href="/auth/signup" className="text-primary font-medium hover:underline">
-              Create account
+            <Link href="/auth/signup" className="text-primary font-semibold hover:underline">
+              Create one
             </Link>
           </p>
         </div>

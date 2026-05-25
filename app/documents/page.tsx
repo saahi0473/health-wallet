@@ -1,29 +1,25 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect } from "react"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Loader2 } from "lucide-react"
 import {
   Search,
   Plus,
-  Filter,
   Grid3X3,
   List,
   FileText,
   Star,
   Trash2,
   Archive,
-  Share2,
   Eye,
-  Download,
   Calendar,
   User,
-  Tag,
-  SlidersHorizontal,
   X,
   Pill,
   TestTube,
@@ -35,8 +31,16 @@ import {
 } from "lucide-react"
 import { AppShell } from "@/components/app-shell"
 import { AddDocumentModal } from "@/components/add-document-modal"
-import { documentStorage, DOCUMENT_CATEGORIES, type Document, type DocumentCategory } from "@/lib/document-management"
-import { sessionStorage as appSession } from "@/lib/user-management"
+import {
+  getUserDocuments,
+  toggleFavorite,
+  toggleArchive,
+  deleteDocument,
+  DOCUMENT_CATEGORIES,
+  type HealthDocument,
+  type DocumentCategory,
+} from "@/lib/firebase-db"
+import { onAuthChange } from "@/lib/firebase-auth"
 import { formatDistanceToNow, format } from "date-fns"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -69,10 +73,10 @@ function DocumentGridCard({
   onDelete,
   onArchive,
 }: {
-  doc: Document
-  onToggleFavorite: (id: string) => void
-  onDelete: (id: string) => void
-  onArchive: (id: string) => void
+  doc: HealthDocument
+  onToggleFavorite: (id: string, current: boolean) => void
+  onDelete: (id: string, storagePath: string) => void
+  onArchive: (id: string, current: boolean) => void
 }) {
   const Icon = categoryIcons[doc.type] || FileText
   const colorClass = categoryColorMap[doc.type] || "bg-gray-500"
@@ -83,19 +87,19 @@ function DocumentGridCard({
       {/* Action buttons on hover */}
       <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
         <button
-          onClick={(e) => { e.preventDefault(); onToggleFavorite(doc.id) }}
+          onClick={(e) => { e.preventDefault(); onToggleFavorite(doc.id, doc.isFavorite) }}
           className="p-1.5 bg-background/90 rounded-lg shadow-sm hover:bg-background transition-colors"
         >
           <Star className={cn("h-3.5 w-3.5", doc.isFavorite ? "text-amber-400 fill-amber-400" : "text-muted-foreground")} />
         </button>
         <button
-          onClick={(e) => { e.preventDefault(); onArchive(doc.id) }}
+          onClick={(e) => { e.preventDefault(); onArchive(doc.id, doc.isArchived) }}
           className="p-1.5 bg-background/90 rounded-lg shadow-sm hover:bg-background transition-colors"
         >
           <Archive className="h-3.5 w-3.5 text-muted-foreground" />
         </button>
         <button
-          onClick={(e) => { e.preventDefault(); onDelete(doc.id) }}
+          onClick={(e) => { e.preventDefault(); onDelete(doc.id, doc.storagePath) }}
           className="p-1.5 bg-background/90 rounded-lg shadow-sm hover:bg-background transition-colors"
         >
           <Trash2 className="h-3.5 w-3.5 text-red-500" />
@@ -127,7 +131,7 @@ function DocumentGridCard({
                 <span className="truncate">{doc.doctor}</span>
               </div>
             )}
-            {doc.tags.length > 0 && (
+            {doc.tags && doc.tags.length > 0 && (
               <div className="flex items-center gap-1 flex-wrap mt-2">
                 {doc.tags.slice(0, 2).map((tag) => (
                   <span key={tag} className="px-1.5 py-0.5 bg-muted rounded text-[10px] font-medium">
@@ -159,10 +163,10 @@ function DocumentListRow({
   onDelete,
   onArchive,
 }: {
-  doc: Document
-  onToggleFavorite: (id: string) => void
-  onDelete: (id: string) => void
-  onArchive: (id: string) => void
+  doc: HealthDocument
+  onToggleFavorite: (id: string, current: boolean) => void
+  onDelete: (id: string, storagePath: string) => void
+  onArchive: (id: string, current: boolean) => void
 }) {
   const Icon = categoryIcons[doc.type] || FileText
   const colorClass = categoryColorMap[doc.type] || "bg-gray-500"
@@ -200,7 +204,7 @@ function DocumentListRow({
 
           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
             <button
-              onClick={() => onToggleFavorite(doc.id)}
+              onClick={() => onToggleFavorite(doc.id, doc.isFavorite)}
               className="p-2 rounded-lg hover:bg-muted transition-colors"
             >
               <Star className={cn("h-4 w-4", doc.isFavorite ? "text-amber-400 fill-amber-400" : "text-muted-foreground")} />
@@ -211,13 +215,13 @@ function DocumentListRow({
               </button>
             </Link>
             <button
-              onClick={() => onArchive(doc.id)}
+              onClick={() => onArchive(doc.id, doc.isArchived)}
               className="p-2 rounded-lg hover:bg-muted transition-colors"
             >
               <Archive className="h-4 w-4 text-muted-foreground" />
             </button>
             <button
-              onClick={() => onDelete(doc.id)}
+              onClick={() => onDelete(doc.id, doc.storagePath)}
               className="p-2 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
             >
               <Trash2 className="h-4 w-4 text-red-500" />
@@ -230,26 +234,33 @@ function DocumentListRow({
 }
 
 function DocumentsContent() {
-  const [documents, setDocuments] = useState<Document[]>([])
+  const [documents, setDocuments] = useState<HealthDocument[]>([])
   const [searchQuery, setSearchQuery] = useState("")
   const [selectedCategory, setSelectedCategory] = useState("all")
   const [sortBy, setSortBy] = useState("newest")
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid")
   const [showAddDocument, setShowAddDocument] = useState(false)
-  const [showFilters, setShowFilters] = useState(false)
-  const [userEmail, setUserEmail] = useState("")
+  const [userId, setUserId] = useState("")
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const session = appSession.getSession()
-    if (session) {
-      setUserEmail(session.email)
-      loadDocuments(session.email)
-    }
+    const unsubscribe = onAuthChange(async (user) => {
+      if (user) {
+        setUserId(user.uid)
+        await loadDocuments(user.uid)
+      }
+      setLoading(false)
+    })
+    return () => unsubscribe()
   }, [])
 
-  const loadDocuments = (email: string) => {
-    const docs = documentStorage.getUserDocuments(email)
-    setDocuments(docs)
+  const loadDocuments = async (uid: string) => {
+    try {
+      const docs = await getUserDocuments(uid)
+      setDocuments(docs)
+    } catch (err) {
+      console.error("Error loading documents:", err)
+    }
   }
 
   const filtered = documents
@@ -258,7 +269,7 @@ function DocumentsContent() {
         !searchQuery ||
         d.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
         d.doctor?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        d.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase())) ||
+        (d.tags && d.tags.some((t) => t.toLowerCase().includes(searchQuery.toLowerCase()))) ||
         DOCUMENT_CATEGORIES[d.type]?.label.toLowerCase().includes(searchQuery.toLowerCase())
 
       const matchCategory = selectedCategory === "all" || d.type === selectedCategory
@@ -280,22 +291,37 @@ function DocumentsContent() {
       }
     })
 
-  const handleToggleFavorite = (id: string) => {
-    documentStorage.toggleFavorite(id)
-    if (userEmail) loadDocuments(userEmail)
-    toast.success("Updated favorites")
+  const handleToggleFavorite = async (id: string, current: boolean) => {
+    try {
+      await toggleFavorite(id, current)
+      if (userId) loadDocuments(userId)
+      toast.success(current ? "Removed from favorites" : "Added to favorites ⭐")
+    } catch (err) {
+      toast.error("Failed to update favorite status")
+    }
   }
 
-  const handleDelete = (id: string) => {
-    documentStorage.deleteDocument(id)
-    if (userEmail) loadDocuments(userEmail)
-    toast.success("Document deleted")
+  const handleDelete = async (id: string, storagePath: string) => {
+    const confirmed = window.confirm("Are you sure you want to delete this document permanently?")
+    if (!confirmed) return
+
+    try {
+      await deleteDocument(id, storagePath)
+      if (userId) loadDocuments(userId)
+      toast.success("Document deleted permanently")
+    } catch (err) {
+      toast.error("Failed to delete document")
+    }
   }
 
-  const handleArchive = (id: string) => {
-    documentStorage.toggleArchive(id)
-    if (userEmail) loadDocuments(userEmail)
-    toast.success("Document archived")
+  const handleArchive = async (id: string, current: boolean) => {
+    try {
+      await toggleArchive(id, current)
+      if (userId) loadDocuments(userId)
+      toast.success(current ? "Unarchived document" : "Document archived")
+    } catch (err) {
+      toast.error("Failed to archive document")
+    }
   }
 
   const clearFilters = () => {
@@ -306,10 +332,18 @@ function DocumentsContent() {
 
   const hasActiveFilters = searchQuery || selectedCategory !== "all" || sortBy !== "newest"
 
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <Loader2 className="h-8 w-8 text-primary animate-spin" />
+      </div>
+    )
+  }
+
   return (
-    <div className="p-4 md:p-6 lg:p-8 pb-24 md:pb-8 space-y-6 max-w-7xl mx-auto">
+    <div className="p-4 md:p-6 lg:p-8 pb-24 md:pb-8 space-y-6 max-w-7xl mx-auto animate-fade-in">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold text-foreground">My Documents</h1>
           <p className="text-muted-foreground mt-1">
@@ -479,7 +513,7 @@ function DocumentsContent() {
       <AddDocumentModal
         open={showAddDocument}
         onOpenChange={setShowAddDocument}
-        onDocumentAdded={() => userEmail && loadDocuments(userEmail)}
+        onDocumentAdded={() => userId && loadDocuments(userId)}
       />
     </div>
   )

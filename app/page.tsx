@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
+import { Loader2 } from "lucide-react"
 import {
   Plus,
   FileText,
@@ -28,9 +29,16 @@ import {
 } from "lucide-react"
 import { AppShell } from "@/components/app-shell"
 import { AddDocumentModal } from "@/components/add-document-modal"
-import { documentStorage, DOCUMENT_CATEGORIES, type Document, type DocumentCategory } from "@/lib/document-management"
-import { sessionStorage as appSession } from "@/lib/user-management"
-import { appointmentStorage, type Appointment } from "@/lib/health-data"
+import {
+  getUserDocuments,
+  getUserAppointments,
+  getCategoryStats,
+  DOCUMENT_CATEGORIES,
+  type HealthDocument,
+  type DocumentCategory,
+  type Appointment,
+} from "@/lib/firebase-db"
+import { onAuthChange, getUserProfile } from "@/lib/firebase-auth"
 import { formatDistanceToNow, format } from "date-fns"
 
 const categoryIcons: Record<DocumentCategory, React.ComponentType<{ className?: string }>> = {
@@ -101,7 +109,7 @@ function StatCard({
   )
 }
 
-function DocumentCard({ doc }: { doc: Document }) {
+function DocumentCard({ doc }: { doc: HealthDocument }) {
   const Icon = categoryIcons[doc.type] || FileText
   const colorClass = categoryColors[doc.type] || "bg-gray-500"
   const catInfo = DOCUMENT_CATEGORIES[doc.type]
@@ -168,14 +176,15 @@ function AppointmentItem({ apt }: { apt: Appointment }) {
 
 function DashboardContent() {
   const [showAddDocument, setShowAddDocument] = useState(false)
-  const [recentDocs, setRecentDocs] = useState<Document[]>([])
+  const [recentDocs, setRecentDocs] = useState<HealthDocument[]>([])
   const [upcomingApts, setUpcomingApts] = useState<Appointment[]>([])
   const [totalDocs, setTotalDocs] = useState(0)
   const [favoriteDocs, setFavoriteDocs] = useState(0)
   const [categoryStats, setCategoryStats] = useState<Record<string, number>>({})
   const [userName, setUserName] = useState("User")
-  const [userEmail, setUserEmail] = useState("")
+  const [userId, setUserId] = useState("")
   const [greeting, setGreeting] = useState("")
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     const h = new Date().getHours()
@@ -183,35 +192,61 @@ function DashboardContent() {
     else if (h < 17) setGreeting("Good afternoon")
     else setGreeting("Good evening")
 
-    const session = appSession.getSession()
-    if (session) {
-      setUserName(session.firstName)
-      setUserEmail(session.email)
-      loadData(session.email)
-    }
+    const unsubscribe = onAuthChange(async (user) => {
+      if (user) {
+        setUserId(user.uid)
+        // Fetch user profile from Firestore
+        const profile = await getUserProfile(user.uid)
+        if (profile) {
+          setUserName(profile.firstName)
+        } else if (user.displayName) {
+          setUserName(user.displayName.split(" ")[0])
+        }
+        await loadData(user.uid)
+      }
+      setLoading(false)
+    })
+    return () => unsubscribe()
   }, [])
 
-  const loadData = (email: string) => {
-    const docs = documentStorage.getUserDocuments(email)
-    const recent = docs.slice(0, 4)
-    const favorites = docs.filter((d) => d.isFavorite)
-    const stats = documentStorage.getCategoryStats(email)
-    const apts = appointmentStorage.getUpcomingAppointments(email, 3)
+  const loadData = async (uid: string) => {
+    try {
+      const docs = await getUserDocuments(uid)
+      const recent = docs.slice(0, 4)
+      const favorites = docs.filter((d) => d.isFavorite)
+      const stats = await getCategoryStats(uid)
+      const apts = await getUserAppointments(uid)
 
-    setRecentDocs(recent)
-    setTotalDocs(docs.length)
-    setFavoriteDocs(favorites.length)
-    setCategoryStats(stats)
-    setUpcomingApts(apts)
+      const nowStr = new Date().toISOString().split("T")[0] // current date yyyy-mm-dd
+      const upcoming = apts
+        .filter((a) => a.date >= nowStr && a.status === "upcoming")
+        .slice(0, 3)
+
+      setRecentDocs(recent)
+      setTotalDocs(docs.length)
+      setFavoriteDocs(favorites.length)
+      setCategoryStats(stats)
+      setUpcomingApts(upcoming)
+    } catch (err) {
+      console.error("Error loading dashboard data:", err)
+    }
   }
 
   const handleDocumentAdded = () => {
-    if (userEmail) loadData(userEmail)
+    if (userId) loadData(userId)
   }
 
   const topCategories = Object.entries(categoryStats)
     .sort(([, a], [, b]) => b - a)
     .slice(0, 4)
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <Loader2 className="h-8 w-8 text-primary animate-spin" />
+      </div>
+    )
+  }
 
   return (
     <div className="p-4 md:p-6 lg:p-8 pb-24 md:pb-8 space-y-8 max-w-7xl mx-auto">

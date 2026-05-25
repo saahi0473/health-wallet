@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Loader2 } from "lucide-react"
 import {
   Select,
   SelectContent,
@@ -27,8 +28,12 @@ import {
   AlertTriangle,
 } from "lucide-react"
 import { AppShell } from "@/components/app-shell"
-import { emergencyStorage, type EmergencyProfile } from "@/lib/health-data"
-import { sessionStorage as appSession } from "@/lib/user-management"
+import {
+  getEmergencyProfile,
+  saveEmergencyProfile,
+  type EmergencyProfile,
+} from "@/lib/firebase-db"
+import { onAuthChange } from "@/lib/firebase-auth"
 import { toast } from "sonner"
 
 const bloodGroups = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-", "Unknown"]
@@ -43,8 +48,9 @@ export default function EmergencyPage() {
 
 function EmergencyContent() {
   const [profile, setProfile] = useState<EmergencyProfile | null>(null)
-  const [userEmail, setUserEmail] = useState("")
+  const [userId, setUserId] = useState("")
   const [isSaving, setIsSaving] = useState(false)
+  const [loading, setLoading] = useState(true)
 
   // Form state
   const [bloodGroup, setBloodGroup] = useState("")
@@ -64,20 +70,27 @@ function EmergencyContent() {
   const [showAddContact, setShowAddContact] = useState(false)
 
   useEffect(() => {
-    const session = appSession.getSession()
-    if (session) {
-      setUserEmail(session.email)
-      const p = emergencyStorage.getProfile(session.email)
-      if (p) {
-        setProfile(p)
-        setBloodGroup(p.bloodGroup || "")
-        setAllergies(p.allergies || [])
-        setConditions(p.conditions || [])
-        setMedications(p.medications || [])
-        setInsuranceProvider(p.insuranceProvider || "")
-        setPolicyNumber(p.insurancePolicyNumber || "")
+    const unsubscribe = onAuthChange(async (user) => {
+      if (user) {
+        setUserId(user.uid)
+        try {
+          const p = await getEmergencyProfile(user.uid)
+          if (p) {
+            setProfile(p)
+            setBloodGroup(p.bloodGroup || "")
+            setAllergies(p.allergies || [])
+            setConditions(p.conditions || [])
+            setMedications(p.medications || [])
+            setInsuranceProvider(p.insuranceProvider || "")
+            setPolicyNumber(p.insurancePolicyNumber || "")
+          }
+        } catch (err) {
+          console.error("Error loading emergency profile:", err)
+        }
       }
-    }
+      setLoading(false)
+    })
+    return () => unsubscribe()
   }, [])
 
   const addTag = (
@@ -98,52 +111,69 @@ function EmergencyContent() {
   }
 
   const handleSave = async () => {
-    if (!userEmail) return
+    if (!userId) return
     setIsSaving(true)
-    await new Promise((r) => setTimeout(r, 500))
 
-    const updated = emergencyStorage.saveProfile(userEmail, {
-      bloodGroup,
-      allergies,
-      conditions,
-      medications,
-      insuranceProvider,
-      insurancePolicyNumber: policyNumber,
-      contacts: profile?.contacts || [],
-    })
-    setProfile(updated)
-    setIsSaving(false)
-    toast.success("Emergency profile saved successfully!")
+    try {
+      await saveEmergencyProfile(userId, {
+        bloodGroup,
+        allergies,
+        conditions,
+        medications,
+        insuranceProvider,
+        insurancePolicyNumber: policyNumber,
+      })
+      
+      const p = await getEmergencyProfile(userId)
+      if (p) setProfile(p)
+      toast.success("Emergency profile saved successfully! 💾")
+    } catch (err) {
+      toast.error("Failed to save emergency profile")
+    } finally {
+      setIsSaving(false)
+    }
   }
 
-  const handleAddContact = () => {
+  const handleAddContact = async () => {
     if (!contactName || !contactPhone || !contactRelationship) {
       toast.error("Please fill in all contact fields")
       return
     }
-    if (!userEmail) return
+    if (!userId) return
 
-    emergencyStorage.addContact(userEmail, {
+    const newContact = {
+      id: Math.random().toString(36).substr(2, 9),
       name: contactName,
       phone: contactPhone,
       relationship: contactRelationship,
-    })
+    }
 
-    const updated = emergencyStorage.getProfile(userEmail)
-    setProfile(updated)
-    setContactName("")
-    setContactPhone("")
-    setContactRelationship("")
-    setShowAddContact(false)
-    toast.success("Emergency contact added!")
+    const updatedContacts = [...(profile?.contacts || []), newContact]
+
+    try {
+      await saveEmergencyProfile(userId, { contacts: updatedContacts })
+      setProfile((prev) => prev ? { ...prev, contacts: updatedContacts } : { userId, contacts: updatedContacts })
+      setContactName("")
+      setContactPhone("")
+      setContactRelationship("")
+      setShowAddContact(false)
+      toast.success("Emergency contact added! 📞")
+    } catch (err) {
+      toast.error("Failed to add contact")
+    }
   }
 
-  const handleRemoveContact = (contactId: string) => {
-    if (!userEmail) return
-    emergencyStorage.removeContact(userEmail, contactId)
-    const updated = emergencyStorage.getProfile(userEmail)
-    setProfile(updated)
-    toast.success("Contact removed")
+  const handleRemoveContact = async (contactId: string) => {
+    if (!userId || !profile?.contacts) return
+    const updatedContacts = profile.contacts.filter((c) => c.id !== contactId)
+
+    try {
+      await saveEmergencyProfile(userId, { contacts: updatedContacts })
+      setProfile((prev) => prev ? { ...prev, contacts: updatedContacts } : null)
+      toast.success("Contact removed")
+    } catch (err) {
+      toast.error("Failed to remove contact")
+    }
   }
 
   const TagInput = ({
@@ -193,6 +223,14 @@ function EmergencyContent() {
       ))}
     </div>
   )
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <Loader2 className="h-8 w-8 text-primary animate-spin" />
+      </div>
+    )
+  }
 
   return (
     <div className="p-4 md:p-6 lg:p-8 pb-24 md:pb-8 space-y-6 max-w-4xl mx-auto animate-fade-in">

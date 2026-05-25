@@ -6,23 +6,22 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { Separator } from "@/components/ui/separator"
+import { Loader2 } from "lucide-react"
 import {
   User,
   Mail,
   Phone,
-  MapPin,
   Save,
   Lock,
   Eye,
   EyeOff,
-  Calendar,
   Shield,
 } from "lucide-react"
 import { AppShell } from "@/components/app-shell"
-import { sessionStorage as appSession, userStorage, type User as UserType } from "@/lib/user-management"
-import { documentStorage } from "@/lib/document-management"
-import { appointmentStorage } from "@/lib/health-data"
+import { auth } from "@/lib/firebase"
+import { onAuthChange, getUserProfile, updateUserProfile } from "@/lib/firebase-auth"
+import { getUserDocuments, getUserAppointments } from "@/lib/firebase-db"
+import { updatePassword, reauthenticateWithCredential, EmailAuthProvider, updateProfile } from "firebase/auth"
 import { toast } from "sonner"
 import { format } from "date-fns"
 
@@ -35,9 +34,10 @@ export default function ProfilePage() {
 }
 
 function ProfileContent() {
-  const [session, setSession] = useState(appSession.getSession())
-  const [user, setUser] = useState<UserType | null>(null)
+  const [userId, setUserId] = useState("")
+  const [userEmail, setUserEmail] = useState("")
   const [isSaving, setIsSaving] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [showCurrentPw, setShowCurrentPw] = useState(false)
   const [showNewPw, setShowNewPw] = useState(false)
 
@@ -58,72 +58,121 @@ function ProfileContent() {
   const [memberSince, setMemberSince] = useState("")
 
   useEffect(() => {
-    const s = appSession.getSession()
-    setSession(s)
-    if (s) {
-      const u = userStorage.findUserByEmail(s.email)
-      if (u) {
-        setUser(u)
-        setFirstName(u.firstName)
-        setLastName(u.lastName)
-        setPhone(u.phone || "")
-        setMemberSince(format(new Date(u.createdAt), "MMMM yyyy"))
+    const unsubscribe = onAuthChange(async (user) => {
+      if (user) {
+        setUserId(user.uid)
+        setUserEmail(user.email || "")
+        try {
+          const profile = await getUserProfile(user.uid)
+          if (profile) {
+            setFirstName(profile.firstName)
+            setLastName(profile.lastName)
+            setPhone(profile.phone || "")
+            setMemberSince(format(new Date(profile.createdAt), "MMMM yyyy"))
+          } else {
+            // Fallback to Firebase auth details
+            const names = (user.displayName || "User").split(" ")
+            setFirstName(names[0] || "")
+            setLastName(names.slice(1).join(" ") || "")
+            setMemberSince(format(new Date(), "MMMM yyyy"))
+          }
+
+          // Fetch Stats
+          const docs = await getUserDocuments(user.uid)
+          const apts = await getUserAppointments(user.uid)
+          setTotalDocs(docs.length)
+          setTotalApts(apts.length)
+        } catch (err) {
+          console.error("Error loading profile stats:", err)
+        }
       }
-      setTotalDocs(documentStorage.getUserDocuments(s.email).length)
-      setTotalApts(appointmentStorage.getUserAppointments(s.email).length)
-    }
+      setLoading(false)
+    })
+    return () => unsubscribe()
   }, [])
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!user) return
+    if (!userId) return
     setIsSaving(true)
-    await new Promise((r) => setTimeout(r, 600))
 
-    const updated = userStorage.updateUser(user.id, {
-      firstName: firstName.trim(),
-      lastName: lastName.trim(),
-      phone: phone.trim(),
-    })
+    try {
+      // Step 1: Update Extra Info in Firestore
+      await updateUserProfile(userId, {
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        phone: phone.trim(),
+      })
 
-    if (updated) {
-      setUser(updated)
-      appSession.updateSession({ firstName: updated.firstName, lastName: updated.lastName })
-      setSession(appSession.getSession())
-      toast.success("Profile updated successfully!")
+      // Step 2: Update display name in Firebase Auth
+      const firebaseUser = auth.currentUser
+      if (firebaseUser) {
+        await updateProfile(firebaseUser, {
+          displayName: `${firstName.trim()} ${lastName.trim()}`,
+        })
+      }
+
+      toast.success("Profile details saved successfully! 👤")
+    } catch (err) {
+      toast.error("Failed to update profile details.")
+    } finally {
+      setIsSaving(false)
     }
-    setIsSaving(false)
   }
 
   const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault()
     setPwError("")
-    if (!user) return
+    const user = auth.currentUser
+    if (!user || !user.email) return
 
-    if (user.password !== currentPw) {
-      setPwError("Current password is incorrect")
+    if (!currentPw) {
+      setPwError("Current password is required")
       return
     }
-    if (newPw.length < 8) {
-      setPwError("New password must be at least 8 characters")
+    if (newPw.length < 6) {
+      setPwError("New password must be at least 6 characters")
       return
     }
     if (newPw !== confirmPw) {
-      setPwError("Passwords don't match")
+      setPwError("Passwords do not match")
       return
     }
 
     setIsSaving(true)
-    await new Promise((r) => setTimeout(r, 600))
-    userStorage.updateUser(user.id, { password: newPw })
-    setCurrentPw("")
-    setNewPw("")
-    setConfirmPw("")
-    setIsSaving(false)
-    toast.success("Password changed successfully!")
+    try {
+      // Reauthenticate user before password update (Firebase requirement)
+      const credential = EmailAuthProvider.credential(user.email, currentPw)
+      await reauthenticateWithCredential(user, credential)
+
+      // Update password
+      await updatePassword(user, newPw)
+
+      setCurrentPw("")
+      setNewPw("")
+      setConfirmPw("")
+      toast.success("Password changed successfully! 🔐")
+    } catch (err: any) {
+      console.error(err)
+      if (err.code === "auth/wrong-password" || err.code === "auth/invalid-credential") {
+        setPwError("Current password is incorrect")
+      } else {
+        setPwError(err.message || "Failed to update password")
+      }
+    } finally {
+      setIsSaving(false)
+    }
   }
 
   const initials = `${firstName[0] || ""}${lastName[0] || ""}`.toUpperCase()
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <Loader2 className="h-8 w-8 text-primary animate-spin" />
+      </div>
+    )
+  }
 
   return (
     <div className="p-4 md:p-6 lg:p-8 pb-24 md:pb-8 space-y-6 max-w-3xl mx-auto animate-fade-in">
@@ -146,8 +195,8 @@ function ProfileContent() {
               <h2 className="text-xl font-bold text-foreground">
                 {firstName} {lastName}
               </h2>
-              <p className="text-muted-foreground text-sm mt-0.5">{session?.email}</p>
-              <p className="text-xs text-muted-foreground mt-1">Member since {memberSince}</p>
+              <p className="text-muted-foreground text-sm mt-0.5">{userEmail}</p>
+              {memberSince && <p className="text-xs text-muted-foreground mt-1">Member since {memberSince}</p>}
 
               {/* Stats */}
               <div className="flex gap-6 mt-4">
@@ -200,7 +249,7 @@ function ProfileContent() {
                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   id="email"
-                  value={session?.email || ""}
+                  value={userEmail}
                   disabled
                   className="pl-10 bg-muted/50 text-muted-foreground"
                 />
@@ -293,7 +342,7 @@ function ProfileContent() {
                   value={newPw}
                   onChange={(e) => setNewPw(e.target.value)}
                   className="pl-10 pr-10"
-                  placeholder="Min 8 characters"
+                  placeholder="Min 6 characters"
                 />
                 <button
                   type="button"

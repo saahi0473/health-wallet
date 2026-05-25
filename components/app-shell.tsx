@@ -3,36 +3,37 @@
 import type React from "react"
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import { Loader2 } from "lucide-react"
+import { Loader2, Activity } from "lucide-react"
 import { AppSidebar } from "@/components/app-sidebar"
 import { MobileNav } from "@/components/mobile-nav"
-import { cn } from "@/lib/utils"
+import { onAuthChange } from "@/lib/firebase-auth"
+import type { User } from "firebase/auth"
 
 interface AppShellProps {
   children: React.ReactNode
 }
 
 export function AppShell({ children }: AppShellProps) {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [user, setUser] = useState<User | null | "loading">("loading")
   const router = useRouter()
 
   useEffect(() => {
-    const authStatus = localStorage.getItem("isAuthenticated")
-    if (authStatus === "true") {
-      setIsAuthenticated(true)
-    } else {
-      setIsAuthenticated(false)
-      router.push("/auth/signin")
-    }
+    // Firebase onAuthStateChanged — real auth listener
+    const unsubscribe = onAuthChange((firebaseUser) => {
+      setUser(firebaseUser)
+      if (!firebaseUser) {
+        router.push("/auth/signin")
+      }
+    })
+    return () => unsubscribe() // cleanup on unmount
   }, [router])
 
-  if (isAuthenticated === null) {
+  if (user === "loading") {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
-          <div className="p-3 gradient-health rounded-2xl animate-pulse">
-            <Loader2 className="h-8 w-8 text-white animate-spin" />
+          <div className="p-3 gradient-health rounded-2xl">
+            <Activity className="h-8 w-8 text-white animate-pulse" />
           </div>
           <p className="text-muted-foreground text-sm">Loading your health wallet...</p>
         </div>
@@ -40,19 +41,14 @@ export function AppShell({ children }: AppShellProps) {
     )
   }
 
-  if (!isAuthenticated) return null
+  if (!user) return null
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
-      <AppSidebar collapsed={sidebarCollapsed} onToggle={setSidebarCollapsed} />
+      <AppSidebar />
       <div className="flex-1 flex flex-col overflow-hidden">
         <MobileNav />
-        <main
-          className={cn(
-            "flex-1 overflow-y-auto scrollbar-thin",
-            "transition-all duration-300"
-          )}
-        >
+        <main className="flex-1 overflow-y-auto scrollbar-thin">
           <div className="page-enter">{children}</div>
         </main>
       </div>

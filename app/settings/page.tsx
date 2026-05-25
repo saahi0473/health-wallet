@@ -1,24 +1,23 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Switch } from "@/components/ui/switch"
 import { Label } from "@/components/ui/label"
 import { Separator } from "@/components/ui/separator"
+import { Loader2 } from "lucide-react"
 import {
   Bell,
-  Moon,
   Shield,
   Trash2,
   Download,
   AlertTriangle,
   Settings,
-  Eye,
 } from "lucide-react"
 import { AppShell } from "@/components/app-shell"
-import { sessionStorage as appSession } from "@/lib/user-management"
-import { documentStorage } from "@/lib/document-management"
+import { onAuthChange, logoutUser, getUserProfile } from "@/lib/firebase-auth"
+import { getUserDocuments, deleteDocument } from "@/lib/firebase-db"
 import { toast } from "sonner"
 import { useRouter } from "next/navigation"
 
@@ -36,50 +35,81 @@ function SettingsContent() {
   const [emailAlerts, setEmailAlerts] = useState(false)
   const [twoFactor, setTwoFactor] = useState(false)
   const [dataSharing, setDataSharing] = useState(false)
+  const [userId, setUserId] = useState("")
+  const [userEmail, setUserEmail] = useState("")
+  const [loading, setLoading] = useState(true)
+  const [isDeleting, setIsDeleting] = useState(false)
 
-  const handleExportData = () => {
-    const session = appSession.getSession()
-    if (!session) return
+  useEffect(() => {
+    const unsubscribe = onAuthChange(async (user) => {
+      if (user) {
+        setUserId(user.uid)
+        setUserEmail(user.email || "")
+      }
+      setLoading(false)
+    })
+    return () => unsubscribe()
+  }, [])
 
-    const docs = documentStorage.getUserDocuments(session.email, true)
-    const exportData = {
-      exportedAt: new Date().toISOString(),
-      user: { email: session.email, firstName: session.firstName, lastName: session.lastName },
-      documents: docs.map(({ fileDataUrl, ...d }) => d), // exclude any base64 data
+  const handleExportData = async () => {
+    if (!userId) return
+
+    try {
+      const docs = await getUserDocuments(userId)
+      const profile = await getUserProfile(userId)
+      
+      const exportData = {
+        exportedAt: new Date().toISOString(),
+        user: profile || { email: userEmail },
+        documents: docs.map(({ fileUrl, ...d }) => d), // export metadata
+      }
+
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `health-wallet-export-${Date.now()}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      toast.success("Data exported successfully! 📥")
+    } catch (err) {
+      toast.error("Failed to export data")
     }
-
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = `health-wallet-export-${Date.now()}.json`
-    a.click()
-    URL.revokeObjectURL(url)
-    toast.success("Data exported successfully!")
   }
 
-  const handleDeleteAccount = () => {
+  const handleDeleteAccount = async () => {
     const confirmed = window.confirm(
-      "Are you sure you want to delete your account? This action cannot be undone."
+      "Are you sure you want to delete your data and sign out? This action cannot be undone."
     )
     if (!confirmed) return
 
-    const session = appSession.getSession()
-    if (session) {
-      // Remove all user data
-      const docs = documentStorage.getUserDocuments(session.email, true)
-      docs.forEach((d) => documentStorage.deleteDocument(d.id))
+    if (!userId) return
+    setIsDeleting(true)
 
-      // Clear user from storage
-      const users = JSON.parse(localStorage.getItem("healthwallet_users") || "[]")
-      const filtered = users.filter((u: { email: string }) => u.email !== session.email)
-      localStorage.setItem("healthwallet_users", JSON.stringify(filtered))
-      localStorage.removeItem(`healthwallet_emergency_${session.email}`)
+    try {
+      // Fetch and delete all user documents
+      const docs = await getUserDocuments(userId)
+      for (const doc of docs) {
+        await deleteDocument(doc.id, doc.storagePath)
+      }
+
+      // Log out user
+      await logoutUser()
+      toast.success("Account data cleared and logged out successfully.")
+      router.push("/auth/signin")
+    } catch (err) {
+      toast.error("Error deleting user data. Please try again.")
+    } finally {
+      setIsDeleting(false)
     }
+  }
 
-    appSession.clearSession()
-    toast.success("Account deleted")
-    router.push("/auth/signin")
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <Loader2 className="h-8 w-8 text-primary animate-spin" />
+      </div>
+    )
   }
 
   return (
@@ -143,7 +173,7 @@ function SettingsContent() {
               checked={twoFactor}
               onCheckedChange={(v) => {
                 setTwoFactor(v)
-                toast.info("2FA setup would require email/phone verification in production")
+                toast.info("2FA setup requires Multi-Factor Authentication configuration in Production console.")
               }}
             />
           </div>
@@ -198,12 +228,22 @@ function SettingsContent() {
             variant="outline"
             className="border-destructive/50 text-destructive hover:bg-destructive/10 gap-2"
             onClick={handleDeleteAccount}
+            disabled={isDeleting}
           >
-            <Trash2 className="h-4 w-4" />
-            Delete My Account
+            {isDeleting ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Deleting Data...
+              </>
+            ) : (
+              <>
+                <Trash2 className="h-4 w-4" />
+                Delete My Data & Sign Out
+              </>
+            )}
           </Button>
           <p className="text-xs text-muted-foreground mt-2">
-            This will permanently delete your account and all associated data.
+            This will permanently delete all uploaded documents and scheduled appointments.
           </p>
         </CardContent>
       </Card>
@@ -212,9 +252,9 @@ function SettingsContent() {
       <Card className="border-border/60">
         <CardContent className="p-5 text-center">
           <p className="text-sm font-semibold text-foreground">Health Wallet</p>
-          <p className="text-xs text-muted-foreground mt-0.5">Version 1.0.0 • Built for your health</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Version 1.0.0 • Built with Firebase Full-Stack</p>
           <p className="text-xs text-muted-foreground mt-3">
-            © 2025 Health Wallet. All rights reserved.
+            © 2026 Health Wallet. All rights reserved.
           </p>
         </CardContent>
       </Card>

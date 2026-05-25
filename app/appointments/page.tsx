@@ -5,8 +5,9 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Loader2 } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -27,15 +28,19 @@ import {
   Clock,
   User,
   Building,
-  FileText,
   Trash2,
   CheckCircle2,
   XCircle,
-  Edit,
 } from "lucide-react"
 import { AppShell } from "@/components/app-shell"
-import { appointmentStorage, type Appointment } from "@/lib/health-data"
-import { sessionStorage as appSession } from "@/lib/user-management"
+import {
+  getUserAppointments,
+  saveAppointment,
+  updateAppointment,
+  deleteAppointment,
+  type Appointment,
+} from "@/lib/firebase-db"
+import { onAuthChange } from "@/lib/firebase-auth"
 import { format, isPast, isToday, isTomorrow } from "date-fns"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -133,19 +138,19 @@ function AppointmentCard({
                   <Button
                     size="sm"
                     variant="outline"
-                    className="gap-1.5 text-emerald-600 hover:text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50"
+                    className="gradient-border hover:bg-emerald-50 text-emerald-600 hover:text-emerald-700 font-medium"
                     onClick={() => onStatusChange(apt.id, "completed")}
                   >
-                    <CheckCircle2 className="h-3.5 w-3.5" />
+                    <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
                     Mark Complete
                   </Button>
                   <Button
                     size="sm"
                     variant="outline"
-                    className="gap-1.5 text-red-500 hover:text-red-600 hover:border-red-300 hover:bg-red-50"
+                    className="border-red-200 text-red-500 hover:text-red-600 hover:bg-red-50 font-medium"
                     onClick={() => onStatusChange(apt.id, "cancelled")}
                   >
-                    <XCircle className="h-3.5 w-3.5" />
+                    <XCircle className="h-3.5 w-3.5 mr-1" />
                     Cancel
                   </Button>
                 </>
@@ -153,7 +158,7 @@ function AppointmentCard({
               <Button
                 size="sm"
                 variant="ghost"
-                className="gap-1.5 text-muted-foreground ml-auto"
+                className="gap-1.5 text-muted-foreground ml-auto hover:text-destructive"
                 onClick={() => onDelete(apt.id)}
               >
                 <Trash2 className="h-3.5 w-3.5" />
@@ -171,10 +176,12 @@ function AddAppointmentModal({
   open,
   onOpenChange,
   onAdded,
+  userId,
 }: {
   open: boolean
   onOpenChange: (v: boolean) => void
   onAdded: () => void
+  userId: string
 }) {
   const [isLoading, setIsLoading] = useState(false)
   const [specialty, setSpecialty] = useState("")
@@ -182,6 +189,8 @@ function AddAppointmentModal({
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
+    if (!userId) return
+
     const form = e.currentTarget
     const data = new FormData(form)
 
@@ -199,30 +208,30 @@ function AddAppointmentModal({
     if (Object.keys(errs).length > 0) return
 
     setIsLoading(true)
-    await new Promise((r) => setTimeout(r, 500))
+    try {
+      await saveAppointment({
+        title,
+        doctor,
+        specialty: specialty || undefined,
+        hospital: (data.get("hospital") as string) || undefined,
+        date,
+        time,
+        notes: (data.get("notes") as string) || undefined,
+        status: "upcoming",
+        userId,
+      })
 
-    const session = appSession.getSession()
-    if (!session) { setIsLoading(false); return }
-
-    appointmentStorage.saveAppointment({
-      title,
-      doctor,
-      specialty,
-      hospital: data.get("hospital") as string,
-      date,
-      time,
-      notes: data.get("notes") as string,
-      status: "upcoming",
-      userEmail: session.email,
-    }, session.email)
-
-    setIsLoading(false)
-    setSpecialty("")
-    setErrors({})
-    form.reset()
-    onOpenChange(false)
-    onAdded()
-    toast.success("Appointment scheduled successfully!")
+      setSpecialty("")
+      setErrors({})
+      form.reset()
+      onOpenChange(false)
+      onAdded()
+      toast.success("Appointment scheduled successfully! 📅")
+    } catch (err) {
+      toast.error("Failed to schedule appointment.")
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   return (
@@ -314,30 +323,49 @@ function AppointmentsContent() {
   const [appointments, setAppointments] = useState<Appointment[]>([])
   const [showAddModal, setShowAddModal] = useState(false)
   const [filterStatus, setFilterStatus] = useState<"all" | Appointment["status"]>("all")
-  const [userEmail, setUserEmail] = useState("")
+  const [userId, setUserId] = useState("")
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const session = appSession.getSession()
-    if (session) {
-      setUserEmail(session.email)
-      loadAppointments(session.email)
-    }
+    const unsubscribe = onAuthChange(async (user) => {
+      if (user) {
+        setUserId(user.uid)
+        await loadAppointments(user.uid)
+      }
+      setLoading(false)
+    })
+    return () => unsubscribe()
   }, [])
 
-  const loadAppointments = (email: string) => {
-    setAppointments(appointmentStorage.getUserAppointments(email))
+  const loadAppointments = async (uid: string) => {
+    try {
+      const data = await getUserAppointments(uid)
+      setAppointments(data)
+    } catch (err) {
+      console.error("Error loading appointments:", err)
+    }
   }
 
-  const handleStatusChange = (id: string, status: Appointment["status"]) => {
-    appointmentStorage.updateAppointment(id, { status })
-    if (userEmail) loadAppointments(userEmail)
-    toast.success(`Appointment marked as ${status}`)
+  const handleStatusChange = async (id: string, status: Appointment["status"]) => {
+    try {
+      await updateAppointment(id, { status })
+      if (userId) loadAppointments(userId)
+      toast.success(`Appointment marked as ${status}`)
+    } catch (err) {
+      toast.error("Failed to update status")
+    }
   }
 
-  const handleDelete = (id: string) => {
-    appointmentStorage.deleteAppointment(id)
-    if (userEmail) loadAppointments(userEmail)
-    toast.success("Appointment deleted")
+  const handleDelete = async (id: string) => {
+    const confirmDelete = window.confirm("Are you sure you want to delete this appointment?")
+    if (!confirmDelete) return
+    try {
+      await deleteAppointment(id)
+      if (userId) loadAppointments(userId)
+      toast.success("Appointment deleted")
+    } catch (err) {
+      toast.error("Failed to delete appointment")
+    }
   }
 
   const filtered = appointments.filter(
@@ -345,6 +373,14 @@ function AppointmentsContent() {
   )
 
   const upcomingCount = appointments.filter((a) => a.status === "upcoming").length
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-[50vh]">
+        <Loader2 className="h-8 w-8 text-primary animate-spin" />
+      </div>
+    )
+  }
 
   return (
     <div className="p-4 md:p-6 lg:p-8 pb-24 md:pb-8 space-y-6 max-w-4xl mx-auto animate-fade-in">
@@ -427,7 +463,8 @@ function AppointmentsContent() {
       <AddAppointmentModal
         open={showAddModal}
         onOpenChange={setShowAddModal}
-        onAdded={() => userEmail && loadAppointments(userEmail)}
+        userId={userId}
+        onAdded={() => userId && loadAppointments(userId)}
       />
     </div>
   )
@@ -440,3 +477,4 @@ export default function AppointmentsPage() {
     </AppShell>
   )
 }
+
